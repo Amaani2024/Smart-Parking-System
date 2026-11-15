@@ -1,14 +1,6 @@
-<div align="center">
-
-# 🚗 ParkEase Smart Parking System
-
-**Book online. Drive in. Pay. Drive out.**
-
-AI number-plate gate · customer website · live admin dashboard · ESP32 sensors · voice assistant, all synced through Firebase.
-
-<img src="docs/images/dashboard.jpg" alt="ParkEase admin dashboard" width="900">
-
-</div>
+<p align="center">
+  <img src="docs/images/banner.jpg" alt="ParkEase Smart Parking System" width="100%">
+</p>
 
 ---
 
