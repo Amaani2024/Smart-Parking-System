@@ -1,0 +1,1984 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ParkEase – Book Your Parking Slot in Seconds</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, get, onValue, update } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBAU3NptLvX-_tgE7r0_JrZALQJGSuRrEc",
+    authDomain: "smartparkingsystem-ccb6e.firebaseapp.com",
+    databaseURL: "https://smartparkingsystem-ccb6e-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "smartparkingsystem-ccb6e",
+    storageBucket: "smartparkingsystem-ccb6e.firebasestorage.app",
+    messagingSenderId: "328696925488",
+    appId: "1:328696925488:web:52d14286928408804e0cf5",
+    measurementId: "G-39RN9CCL3Y"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  window.db = db;
+  window.fbModules = { ref, set, get, onValue, update };
+  window.__firebaseConnected = false;
+
+  // Display slots. This reads many Firebase formats:
+  // /slots/A-01/status, /slots/slot1, /slots/IR1, /sensors/IR1, /sensors/slot1, etc.
+  const PARKING_SLOTS = ["A-01", "A-02", "A-03", "A-04"];
+  const SLOT_ALIASES = {
+    "A-01": ["A-01", "A01", "A1", "S1", "s1", "Slot1", "slot1", "slot_1", "slot01", "parkingSlot1", "parking_slot_1", "IR1", "ir1", "1"],
+    "A-02": ["A-02", "A02", "A2", "S2", "s2", "Slot2", "slot2", "slot_2", "slot02", "parkingSlot2", "parking_slot_2", "IR2", "ir2", "2"],
+    "A-03": ["A-03", "A03", "A3", "S3", "s3", "Slot3", "slot3", "slot_3", "slot03", "parkingSlot3", "parking_slot_3", "IR3", "ir3", "3"],
+    "A-04": ["A-04", "A04", "A4", "S4", "s4", "Slot4", "slot4", "slot_4", "slot04", "parkingSlot4", "parking_slot_4", "IR4", "ir4", "4"]
+  };
+
+  let rawFirebaseSlots = {};
+  let rawFirebaseSensors = {};
+  let latestSlots = {};
+  let latestBookings = {};
+
+  function nowISO() {
+    return new Date().toISOString();
+  }
+
+  function normalisePlate(value = "") {
+    return String(value).trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  }
+
+  function normaliseStatus(value) {
+    if (value === undefined || value === null || value === "") return "available";
+
+    if (typeof value === "boolean") {
+      // Most IR/Firebase systems use true = object detected, false = free.
+      // If your ESP32 uses the opposite logic, change these two lines only.
+      return value ? "occupied" : "available";
+    }
+
+    if (typeof value === "number") return value === 1 ? "occupied" : "available";
+
+    const status = String(value).trim().toLowerCase();
+
+    if (["true", "yes", "1", "high", "detected", "active", "occupied", "busy", "parked", "full", "taken", "blocked"].includes(status)) return "occupied";
+    if (["false", "no", "0", "low", "available", "free", "empty", "vacant", "open", "clear"].includes(status)) return "available";
+    if (["reserved", "booked", "booking", "waiting", "hold", "pending"].includes(status)) return "reserved";
+    if (["paid", "completed", "complete", "done", "exit", "exited", "cancelled", "canceled"].includes(status)) return "available";
+
+    return "available";
+  }
+
+  function buildDefaultSlots() {
+    const slots = {};
+    PARKING_SLOTS.forEach(id => {
+      slots[id] = {
+        id,
+        originalKey: id,
+        status: "available",
+        plate: "",
+        bookingId: "",
+        updatedAt: nowISO(),
+        source: "default"
+      };
+    });
+    return slots;
+  }
+
+  function lowerKeyMap(obj) {
+    const map = {};
+    if (!obj || typeof obj !== "object") return map;
+    Object.keys(obj).forEach(key => { map[String(key).toLowerCase()] = key; });
+    return map;
+  }
+
+  function readPossibleSlot(source, displayId) {
+    if (!source || typeof source !== "object") return null;
+
+    const keyMap = lowerKeyMap(source);
+    const aliases = SLOT_ALIASES[displayId] || [displayId];
+
+    for (const alias of aliases) {
+      const realKey = keyMap[String(alias).toLowerCase()];
+      if (realKey !== undefined) {
+        return { key: realKey, value: source[realKey] };
+      }
+    }
+
+    return null;
+  }
+
+  function statusFromObject(obj) {
+    if (!obj || typeof obj !== "object") return normaliseStatus(obj);
+
+    if (obj.status !== undefined) return normaliseStatus(obj.status);
+    if (obj.state !== undefined) return normaliseStatus(obj.state);
+    if (obj.slotStatus !== undefined) return normaliseStatus(obj.slotStatus);
+    if (obj.value !== undefined) return normaliseStatus(obj.value);
+    if (obj.detected !== undefined) return normaliseStatus(obj.detected);
+    if (obj.ir !== undefined) return normaliseStatus(obj.ir);
+    if (obj.sensor !== undefined) return normaliseStatus(obj.sensor);
+    if (obj.occupied !== undefined) return normaliseStatus(obj.occupied);
+
+    // Important: available=true means available, not occupied.
+    if (obj.available !== undefined) return obj.available ? "available" : "occupied";
+    if (obj.free !== undefined) return obj.free ? "available" : "occupied";
+
+    return "available";
+  }
+
+  function normaliseSlot(displayId, rawSlot, sourceName = "slots", originalKey = displayId) {
+    if (rawSlot && typeof rawSlot === "object" && !Array.isArray(rawSlot)) {
+      return {
+        id: displayId,
+        originalKey,
+        status: statusFromObject(rawSlot),
+        plate: normalisePlate(rawSlot.plate || rawSlot.vehiclePlate || rawSlot.vehicle || rawSlot.car || rawSlot.numberPlate || ""),
+        bookingId: rawSlot.bookingId || rawSlot.booking_id || "",
+        updatedAt: rawSlot.updatedAt || rawSlot.updated_at || rawSlot.lastUpdated || rawSlot.timestamp || rawSlot.time || nowISO(),
+        source: sourceName
+      };
+    }
+
+    return {
+      id: displayId,
+      originalKey,
+      status: normaliseStatus(rawSlot),
+      plate: "",
+      bookingId: "",
+      updatedAt: nowISO(),
+      source: sourceName
+    };
+  }
+
+  function getSlotsFromSource(source, sourceName) {
+    const result = {};
+
+    PARKING_SLOTS.forEach(displayId => {
+      const found = readPossibleSlot(source, displayId);
+      if (found) {
+        result[displayId] = normaliseSlot(displayId, found.value, sourceName, found.key);
+      }
+    });
+
+    return result;
+  }
+
+  function isPaidOrClosed(booking) {
+    const status = String(booking?.status || "").trim().toLowerCase();
+    return booking?.paid === true || ["paid", "completed", "complete", "done", "exited", "cancelled", "canceled"].includes(status);
+  }
+
+  function isActiveBooking(booking) {
+    if (!booking) return false;
+    if (isPaidOrClosed(booking)) return false;
+
+    const status = String(booking.status || "").trim().toLowerCase();
+    return status === "booked" || status === "reserved" || status === "waiting" || booking.entered === true || booking.paid === false;
+  }
+
+  function mergeBookingSlots(slots) {
+    Object.entries(latestBookings || {}).forEach(([plateKey, booking]) => {
+      if (!isActiveBooking(booking)) return;
+
+      const bookingSlot = booking.slot || booking.slotId || booking.parkingSlot;
+      if (!bookingSlot) return;
+
+      const displayId = PARKING_SLOTS.find(id =>
+        id.toLowerCase() === String(bookingSlot).toLowerCase() ||
+        (SLOT_ALIASES[id] || []).some(alias => String(alias).toLowerCase() === String(bookingSlot).toLowerCase())
+      );
+
+      if (!displayId || !slots[displayId]) return;
+
+      if (slots[displayId].status === "available") {
+        slots[displayId] = {
+          ...slots[displayId],
+          status: booking.entered === true ? "occupied" : "reserved",
+          plate: normalisePlate(booking.plate || plateKey),
+          bookingId: booking.bookingId || "",
+          updatedAt: booking.updatedAt || booking.createdAt || booking.entry_time || booking.entryTime || slots[displayId].updatedAt,
+          source: "bookings"
+        };
+      }
+    });
+
+    return slots;
+  }
+
+  function rebuildAndRenderSlots() {
+    let slots = buildDefaultSlots();
+
+    const slotsFromDb = getSlotsFromSource(rawFirebaseSlots, "slots");
+    slots = { ...slots, ...slotsFromDb };
+
+    const sensorsFromDb = getSlotsFromSource(rawFirebaseSensors, "sensors");
+    Object.entries(sensorsFromDb).forEach(([id, sensorSlot]) => {
+      if (sensorSlot.status === "occupied") {
+        slots[id] = { ...slots[id], ...sensorSlot, status: "occupied" };
+      } else if (slots[id].source === "default") {
+        slots[id] = { ...slots[id], ...sensorSlot };
+      }
+    });
+
+    slots = mergeBookingSlots(slots);
+    latestSlots = slots;
+
+    const counts = getStatusCounts(latestSlots);
+    updateCounter("c-total", counts.total);
+    updateCounter("c-avail", counts.available);
+    updateCounter("c-occup", counts.occupied);
+    updateCounter("c-reser", counts.reserved);
+    updateCounter("s-slots", counts.available);
+
+    updateSlotGrid(latestSlots);
+    updateSlotDropdown(latestSlots);
+    renderRecentActivity();
+
+    console.log("ParkEase live /slots:", rawFirebaseSlots);
+    console.log("ParkEase live /sensors:", rawFirebaseSensors);
+    console.log("ParkEase rendered slots:", latestSlots);
+  }
+
+  function getStatusCounts(slots) {
+    const values = Object.values(slots || {});
+    return {
+      total: values.length,
+      available: values.filter(s => s.status === "available").length,
+      occupied: values.filter(s => s.status === "occupied").length,
+      reserved: values.filter(s => s.status === "reserved").length
+    };
+  }
+
+  function updateCounter(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+
+    if (typeof animateCounter === "function") animateCounter(id, Number(value) || 0);
+    else el.textContent = Number(value) || 0;
+  }
+
+  function updateSlotDropdown(slots) {
+    const select = document.getElementById("b-slot");
+    if (!select) return;
+
+    const currentValue = select.value;
+    select.innerHTML = `<option value="">— Choose Slot —</option>`;
+
+    Object.entries(slots || {})
+      .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+      .forEach(([slotId, slot]) => {
+        const status = normaliseStatus(slot.status);
+        const option = document.createElement("option");
+
+        option.value = slotId;
+        option.dataset.status = status;
+        option.textContent = status === "available"
+          ? `${slotId} — Available`
+          : `${slotId} — ${status.toUpperCase()}${slot.plate ? " (" + slot.plate + ")" : ""}`;
+
+        if (status !== "available") option.disabled = true;
+        select.appendChild(option);
+      });
+
+    if ([...select.options].some(o => o.value === currentValue && !o.disabled)) {
+      select.value = currentValue;
+    }
+  }
+
+  function updateSlotGrid(slots) {
+    const grid = document.getElementById("slotGrid");
+    if (!grid) return;
+
+    grid.innerHTML = "";
+
+    Object.entries(slots || {})
+      .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+      .forEach(([slotId, slot]) => {
+        const status = normaliseStatus(slot.status);
+        const el = document.createElement("div");
+
+        el.className = `slot-cell ${status}`;
+        el.dataset.id = slotId;
+        el.dataset.status = status;
+        el.title = `Source: ${slot.source || "unknown"}${slot.originalKey ? " / " + slot.originalKey : ""}`;
+        el.innerHTML = `
+          <span class="slot-id">${slotId}</span>
+          <span class="slot-st">${status}</span>
+          ${slot.plate ? `<span class="slot-plate">${slot.plate}</span>` : ""}
+        `;
+
+        el.addEventListener("click", (event) => window.selectSlot(event, slotId, status));
+        grid.appendChild(el);
+      });
+  }
+
+  function toDate(value) {
+    if (!value && value !== 0) return null;
+
+    if (typeof value === "number") {
+      if (value <= 0) return null;
+      return new Date(value < 100000000000 ? value * 1000 : value);
+    }
+
+    const str = String(value).trim();
+    if (!str || str === "0") return null;
+
+    if (/^\d+$/.test(str)) {
+      const num = Number(str);
+      if (num <= 0) return null;
+      return new Date(num < 100000000000 ? num * 1000 : num);
+    }
+
+    const parsed = new Date(str);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  function formatTime(value) {
+    const d = toDate(value);
+    if (!d) return "Live update";
+    return d.toLocaleString("en-LK", { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  function isToday(value) {
+    const d = toDate(value);
+    if (!d) return false;
+
+    const today = new Date();
+    return d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && d.getDate() === today.getDate();
+  }
+
+  function buildBookingActivity(plate, booking) {
+    const normalizedPlate = normalisePlate(booking.plate || plate);
+    const status = String(booking.status || (booking.paid ? "Paid" : "booked"));
+
+    let activityTime = booking.updatedAt || booking.createdAt || booking.entry_time || booking.entryTime || booking.exit_time || booking.exitTime;
+    let title = "Booking updated";
+    let css = "reserved";
+
+    if (isPaidOrClosed(booking)) {
+      title = "Payment / exit completed";
+      css = "paid";
+      activityTime = booking.exit_time || booking.exitTime || booking.updatedAt || booking.createdAt;
+    } else if (booking.entered === true) {
+      title = "Vehicle entered";
+      css = "occupied";
+      activityTime = booking.entry_time || booking.entryTime || booking.updatedAt || booking.createdAt;
+    } else if (["booked", "reserved", "waiting"].includes(status.toLowerCase())) {
+      title = "Slot reserved";
+      css = "reserved";
+      activityTime = booking.createdAt || booking.updatedAt;
+    }
+
+    const d = toDate(activityTime);
+    return {
+      sortTime: d ? d.getTime() : 0,
+      html: `
+        <div class="activity-item">
+          <div>
+            <div class="activity-left">${title}${booking.slot ? " · " + booking.slot : ""}</div>
+            <div class="activity-time">${normalizedPlate || plate} · ${formatTime(activityTime)}</div>
+          </div>
+          <div class="activity-status ${css}">${status.toUpperCase()}</div>
+        </div>
+      `
+    };
+  }
+
+  function buildSlotActivity(slot) {
+    const d = toDate(slot.updatedAt);
+    return {
+      sortTime: d ? d.getTime() : 0,
+      html: `
+        <div class="activity-item">
+          <div>
+            <div class="activity-left">${slot.id}${slot.plate ? " · " + slot.plate : ""}</div>
+            <div class="activity-time">Source: ${slot.source || "slots"}${slot.originalKey ? " / " + slot.originalKey : ""} · ${formatTime(slot.updatedAt)}</div>
+          </div>
+          <div class="activity-status ${slot.status}">${String(slot.status || "available").toUpperCase()}</div>
+        </div>
+      `
+    };
+  }
+
+  function renderRecentActivity() {
+    const box = document.getElementById("slotActivityList");
+    if (!box) return;
+
+    const slotActivity = Object.values(latestSlots || {}).map(buildSlotActivity);
+    const bookingActivity = Object.entries(latestBookings || {}).map(([plate, booking]) => buildBookingActivity(plate, booking));
+    const all = [...bookingActivity, ...slotActivity].sort((a, b) => b.sortTime - a.sortTime).slice(0, 8);
+
+    if (!all.length) {
+      box.innerHTML = "Connected, but no slot/booking activity found yet.";
+      return;
+    }
+
+    box.innerHTML = all.map(item => item.html).join("");
+  }
+
+  function updateBookingStats(bookings) {
+    const list = Object.values(bookings || {});
+
+    const vehiclesToday = list.filter(b =>
+      isToday(b.createdAt) || isToday(b.updatedAt) || isToday(b.entry_time) || isToday(b.entryTime) || isToday(b.exit_time) || isToday(b.exitTime)
+    ).length;
+
+    const activeBookings = list.filter(isActiveBooking).length;
+    updateCounter("s-today", vehiclesToday);
+    updateCounter("s-active", activeBookings);
+  }
+
+  function initRealtimeSlots() {
+    // Important: no ensureDefaultSlots() here. That write/check was blocking the listener on some Firebase rules.
+    onValue(ref(db, "slots"), (snapshot) => {
+      window.__firebaseConnected = true;
+      rawFirebaseSlots = snapshot.val() || {};
+      rebuildAndRenderSlots();
+    }, (error) => {
+      console.error("Firebase /slots listener error:", error);
+      showToast("Firebase /slots listener blocked. Check database rules.", "error");
+    });
+
+    onValue(ref(db, "sensors"), (snapshot) => {
+      window.__firebaseConnected = true;
+      rawFirebaseSensors = snapshot.val() || {};
+      rebuildAndRenderSlots();
+    }, (error) => {
+      console.error("Firebase /sensors listener error:", error);
+    });
+  }
+
+  function initRealtimeBookings() {
+    onValue(ref(db, "bookings"), (snapshot) => {
+      window.__firebaseConnected = true;
+      latestBookings = snapshot.val() || {};
+      updateBookingStats(latestBookings);
+      rebuildAndRenderSlots();
+      renderRecentActivity();
+    }, (error) => {
+      console.error("Firebase /bookings listener error:", error);
+      showToast("Firebase /bookings listener blocked. Check database rules.", "error");
+    });
+  }
+
+  window.submitBooking = async function() {
+    const name = document.getElementById("b-name").value.trim();
+    const phone = document.getElementById("b-phone").value.trim();
+    const rawPlate = document.getElementById("b-plate").value;
+    const plate = normalisePlate(rawPlate);
+    const vtype = document.getElementById("b-vtype").value;
+    const slot = document.getElementById("b-slot").value.trim();
+    const arrival = document.getElementById("b-arrival").value;
+
+    if (!name || !phone || !plate || !vtype || !slot || !arrival) {
+      showToast("Please fill all fields", "error");
+      return;
+    }
+
+    showLoader(true);
+
+    try {
+      const currentSlot = latestSlots[slot] || buildDefaultSlots()[slot];
+
+      if (normaliseStatus(currentSlot.status) !== "available") {
+        showToast("This slot is already booked/occupied. Choose a free slot.", "error");
+        showLoader(false);
+        return;
+      }
+
+      const existingBookingSnap = await get(ref(db, "bookings/" + plate));
+      if (existingBookingSnap.exists() && isActiveBooking(existingBookingSnap.val())) {
+        showToast("This vehicle already has an active booking.", "error");
+        showLoader(false);
+        return;
+      }
+
+      const bookingId = "PE-" + Math.random().toString(36).substr(2, 6).toUpperCase();
+      const bookingData = {
+        bookingId,
+        name,
+        phone,
+        plate,
+        vehicleType: vtype,
+        slot,
+        estimatedArrival: arrival,
+        status: "booked",
+        entryStatus: "waiting",
+        paid: false,
+        entered: false,
+        createdAt: nowISO(),
+        updatedAt: nowISO()
+      };
+
+      await set(ref(db, "bookings/" + plate), bookingData);
+
+      // Write to the same key your Firebase already uses when possible.
+      const firebaseSlotKey = currentSlot.originalKey || slot;
+      await update(ref(db, "slots/" + firebaseSlotKey), {
+        id: slot,
+        status: "reserved",
+        plate,
+        bookingId,
+        updatedAt: nowISO()
+      });
+
+      showBookingResult(bookingData);
+      showToast("Booking saved successfully!", "success");
+
+      document.getElementById("b-name").value = "";
+      document.getElementById("b-phone").value = "";
+      document.getElementById("b-plate").value = "";
+      document.getElementById("b-vtype").value = "";
+      document.getElementById("b-arrival").value = "";
+    } catch (e) {
+      console.error("Booking error:", e);
+      showToast("Booking failed. Check Firebase rules for /bookings and /slots.", "error");
+    }
+
+    showLoader(false);
+  };
+
+  let lookupUnsub = null;
+
+  window.checkPlate = async function() {
+    const plate = normalisePlate(document.getElementById("lookup-plate").value);
+
+    if (!plate) {
+      showToast("Enter a number plate", "error");
+      return;
+    }
+
+    if (lookupUnsub) { lookupUnsub(); lookupUnsub = null; }
+    showLoader(true);
+
+    // Live listener: the card updates by itself when the gate script or admin changes the booking.
+    lookupUnsub = onValue(ref(db, "bookings/" + plate), (snap) => {
+      showLoader(false);
+      showLookupResult(snap.exists() ? snap.val() : null);
+    }, (e) => {
+      console.error("Lookup error:", e);
+      showLoader(false);
+      showToast("Could not check booking. Check Firebase connection.", "error");
+      showLookupResult(null);
+    });
+  };
+
+  // DEMO payment: only works while the exit camera has marked the booking awaiting_payment.
+  window.completeDemoPayment = async function(plate) {
+    const snap = await get(ref(db, "bookings/" + plate));
+    const b = snap.val();
+    if (!b) throw new Error("Booking not found");
+    if (b.paid === true) return b.receiptId || "";
+    if (b.status !== "awaiting_payment") throw new Error("Payment is only available at the exit");
+    const receiptId = "RC-" + Math.random().toString(36).substr(2, 5).toUpperCase();
+    await update(ref(db, "bookings/" + plate), {
+      paid: true,
+      paidAt: Math.floor(Date.now() / 1000),
+      paymentMethod: "demo-card",
+      receiptId,
+      updatedAt: nowISO()
+    });
+    return receiptId;
+  };
+
+  initRealtimeSlots();
+  initRealtimeBookings();
+</script>
+
+
+
+<style>
+  :root {
+    --blue-deep: #0A1F44;
+    --blue-mid:  #1A3A6B;
+    --blue-sky:  #1E6FD9;
+    --blue-lite: #4A9FFF;
+    --blue-glow: #60B4FF;
+    --green:     #00C97A;
+    --amber:     #F5A623;
+    --red:       #FF4560;
+    --white:     #FFFFFF;
+    --gray-bg:   #F0F4FA;
+    --gray-lite: #E8EEF8;
+    --text-dark: #0A1F44;
+    --text-mid:  #3A5070;
+    --text-lite: #7090B0;
+    --card-shadow: 0 8px 40px rgba(10,31,68,0.13);
+    --card-hover:  0 20px 60px rgba(30,111,217,0.22);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--white);
+    color: var(--text-dark);
+    overflow-x: hidden;
+  }
+
+  h1,h2,h3,h4 { font-family: 'Syne', sans-serif; }
+
+  /* ── NAVBAR ── */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 5%; height: 68px;
+    background: rgba(255,255,255,0.9);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid rgba(30,111,217,0.1);
+    box-shadow: 0 2px 20px rgba(10,31,68,0.08);
+  }
+  .nav-logo { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .logo-icon {
+    width: 42px; height: 42px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--blue-deep), var(--blue-sky));
+    display: flex; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
+    box-shadow: 0 4px 14px rgba(30,111,217,0.35);
+  }
+  .logo-icon svg { width: 26px; height: 26px; }
+  .logo-text { font-family:'Syne',sans-serif; font-weight:800; font-size:1.35rem; color:var(--blue-deep); letter-spacing:-0.5px; }
+  .logo-text span { color: var(--blue-sky); }
+
+  .nav-links { display: flex; gap: 32px; list-style: none; }
+  .nav-links a { text-decoration:none; color:var(--text-mid); font-size:0.9rem; font-weight:500; transition:color .2s; }
+  .nav-links a:hover { color:var(--blue-sky); }
+  .nav-cta {
+    background: linear-gradient(135deg, var(--blue-sky), var(--blue-lite));
+    color: #fff; border: none; padding: 10px 22px; border-radius: 8px;
+    font-family:'Syne',sans-serif; font-weight:600; font-size:0.88rem;
+    cursor: pointer; transition: transform .2s, box-shadow .2s;
+    box-shadow: 0 4px 14px rgba(30,111,217,0.35);
+  }
+  .nav-cta:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(30,111,217,0.45); }
+
+  /* ── HERO ── */
+  #hero {
+    min-height: 100vh;
+    background: linear-gradient(160deg, var(--blue-deep) 0%, var(--blue-mid) 55%, #0D3080 100%);
+    display: flex; align-items: center;
+    padding: 100px 5% 60px;
+    position: relative; overflow: hidden;
+  }
+  .hero-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 60px; align-items: center; max-width: 1200px; margin: 0 auto; width: 100%; }
+
+  .hero-image-box{
+  position:relative;
+  border-radius:18px;
+  overflow:hidden;
+  box-shadow:0 20px 60px rgba(0,0,0,0.35);
+}
+
+.hero-image-box img{
+  width:100%;
+  height:320px;
+  object-fit:cover;
+  display:block;
+}
+
+.hero-image-overlay{
+  position:absolute;
+  bottom:0;
+  left:0;
+  right:0;
+  padding:14px;
+  background:rgba(10,31,68,0.6);
+  color:#fff;
+  font-weight:700;
+  font-family:'Syne',sans-serif;
+}
+  /* 3D floating shapes */
+  .hero-shape {
+    position: absolute; border-radius: 50%;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .hs1 { width:500px; height:500px; top:-100px; right:-80px; animation: floatA 8s ease-in-out infinite; }
+  .hs2 { width:300px; height:300px; bottom:-60px; left:10%; animation: floatB 10s ease-in-out infinite; }
+  .hs3 { width:180px; height:180px; top:30%; left:30%; animation: floatA 12s ease-in-out infinite reverse; }
+
+  @keyframes floatA { 0%,100%{transform:translateY(0) rotate(0deg)} 50%{transform:translateY(-20px) rotate(5deg)} }
+  @keyframes floatB { 0%,100%{transform:translateY(0) rotate(0deg)} 50%{transform:translateY(15px) rotate(-8deg)} }
+
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+    padding: 6px 14px; border-radius: 100px; margin-bottom: 22px;
+    font-size: 0.82rem; color: rgba(255,255,255,0.85); font-weight: 500;
+    backdrop-filter: blur(10px);
+  }
+  .hero-badge .dot { width:8px; height:8px; background:var(--green); border-radius:50%; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(1.3)} }
+
+  .hero-h1 {
+    font-size: clamp(2.2rem, 4.5vw, 3.6rem);
+    font-weight: 800; color: #fff; line-height: 1.1; letter-spacing: -1px;
+    margin-bottom: 18px;
+  }
+  .hero-h1 span { color: var(--blue-glow); }
+  .hero-tagline { font-size: 1.1rem; color: rgba(255,255,255,0.65); margin-bottom: 36px; font-weight: 400; line-height: 1.6; }
+
+  .hero-btns { display: flex; gap: 14px; flex-wrap: wrap; }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--blue-lite), #60D0FF);
+    color: var(--blue-deep); font-family:'Syne',sans-serif; font-weight:700;
+    padding: 14px 28px; border-radius: 10px; border: none; cursor: pointer;
+    font-size: 0.95rem; transition: all .25s;
+    box-shadow: 0 8px 24px rgba(74,159,255,0.45);
+  }
+  .btn-primary:hover { transform: translateY(-3px); box-shadow: 0 14px 36px rgba(74,159,255,0.55); }
+  .btn-outline {
+    background: transparent; border: 1.5px solid rgba(255,255,255,0.35);
+    color: #fff; font-family:'Syne',sans-serif; font-weight:600;
+    padding: 13px 26px; border-radius: 10px; cursor: pointer; font-size:0.95rem;
+    transition: all .25s; backdrop-filter: blur(8px);
+  }
+  .btn-outline:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.6); transform: translateY(-2px); }
+
+  .trust-row { display:flex; gap:20px; margin-top:32px; flex-wrap:wrap; }
+  .trust-item { display:flex; align-items:center; gap:7px; color:rgba(255,255,255,0.7); font-size:0.84rem; }
+  .trust-item i { color:var(--green); font-size:0.75rem; }
+
+  /* HERO RIGHT — 3D PARKING VISUAL */
+  .hero-right { position:relative; z-index:2; }
+  .parking-3d {
+    background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05));
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 20px; padding: 28px;
+    backdrop-filter: blur(20px);
+    box-shadow: 0 30px 80px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.1);
+    transform-style: preserve-3d;
+    animation: cardFloat 6s ease-in-out infinite;
+  }
+  @keyframes cardFloat { 0%,100%{transform:perspective(800px) rotateX(3deg) rotateY(-5deg) translateY(0)} 50%{transform:perspective(800px) rotateX(1deg) rotateY(-3deg) translateY(-8px)} }
+
+  .p3d-title { color:rgba(255,255,255,0.5); font-size:0.75rem; text-transform:uppercase; letter-spacing:2px; margin-bottom:16px; font-weight:500; }
+  .slot-mini-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin-bottom:20px; }
+  .slot-mini {
+    aspect-ratio:0.6; border-radius:6px; font-size:0.65rem; font-family:'Syne',sans-serif; font-weight:700;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:2px; cursor:pointer; transition:transform .15s;
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  .slot-mini:hover { transform:scale(1.07); }
+  .slot-mini.avail  { background:rgba(0,201,122,0.2);  color:var(--green); }
+  .slot-mini.occup  { background:rgba(255,69,96,0.2);   color:var(--red); }
+  .slot-mini.reserv { background:rgba(245,166,35,0.2);  color:var(--amber); }
+  .slot-mini i { font-size:0.9rem; }
+
+  .p3d-stats { display:flex; justify-content:space-between; border-top:1px solid rgba(255,255,255,0.1); padding-top:16px; }
+  .p3d-stat { text-align:center; }
+  .p3d-stat .num { font-family:'Syne',sans-serif; font-weight:800; font-size:1.5rem; color:#fff; }
+  .p3d-stat .lbl { font-size:0.7rem; color:rgba(255,255,255,0.45); margin-top:2px; }
+  .live-badge { display:inline-flex; align-items:center; gap:5px; background:rgba(0,201,122,0.15); border:1px solid rgba(0,201,122,0.3); padding:5px 12px; border-radius:100px; color:var(--green); font-size:0.75rem; font-weight:600; margin-bottom:12px; }
+
+  /* ── REAL PHOTO SECTION ── */
+  #real-photo {
+    padding: 0;
+    position: relative;
+    overflow: hidden;
+  }
+  .photo-strip {
+    position: relative; height: 440px;
+    background: url('https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Galle_Face_Hotel_Car_Park.jpg/1200px-Galle_Face_Hotel_Car_Park.jpg') center/cover no-repeat;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .photo-overlay {
+    position: absolute; inset: 0;
+    background: linear-gradient(135deg, rgba(10,31,68,0.82) 0%, rgba(10,31,68,0.55) 60%, rgba(30,111,217,0.4) 100%);
+  }
+  .photo-content { position:relative; z-index:2; text-align:center; color:#fff; padding:0 20px; }
+  .photo-content h2 { font-size:clamp(1.6rem,3.5vw,2.6rem); font-weight:800; margin-bottom:10px; }
+  .photo-content p { color:rgba(255,255,255,0.75); font-size:1.05rem; margin-bottom:22px; }
+  .photo-tag { display:inline-block; background:rgba(255,255,255,0.15); border:1px solid rgba(255,255,255,0.25); padding:6px 16px; border-radius:100px; font-size:0.8rem; backdrop-filter:blur(8px); }
+
+  .photo-cards {
+    display: flex; gap: 16px; position: absolute;
+    bottom: -28px; left: 50%; transform: translateX(-50%);
+    z-index: 3; padding: 0 20px;
+  }
+  .photo-card {
+    background: #fff; border-radius: 14px; padding: 16px 22px;
+    box-shadow: 0 12px 40px rgba(10,31,68,0.18);
+    text-align: center; min-width: 130px; white-space: nowrap;
+  }
+  .photo-card .pc-num { font-family:'Syne',sans-serif; font-weight:800; font-size:1.6rem; color:var(--blue-sky); }
+  .photo-card .pc-lbl { font-size:0.75rem; color:var(--text-lite); margin-top:2px; }
+
+  /* ── STATS STRIP ── */
+  #stats {
+    background: var(--blue-deep); padding: 80px 5% 40px;
+  }
+  .stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:20px; max-width:1200px; margin:0 auto; }
+  .stat-card {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px; padding: 28px 24px;
+    text-align: center; position: relative; overflow: hidden;
+    transition: transform .3s, box-shadow .3s;
+  }
+  .stat-card:hover { transform: translateY(-6px); box-shadow: 0 20px 50px rgba(0,0,0,0.3); }
+  .stat-card::before {
+    content:''; position:absolute; top:0; left:0; right:0; height:3px;
+    border-radius:3px 3px 0 0;
+  }
+  .stat-card.blue::before  { background:linear-gradient(90deg,var(--blue-sky),var(--blue-lite)); }
+  .stat-card.green::before { background:linear-gradient(90deg,var(--green),#00FF9D); }
+  .stat-card.red::before   { background:linear-gradient(90deg,var(--red),#FF8C9E); }
+  .stat-card.amber::before { background:linear-gradient(90deg,var(--amber),#FFD060); }
+  .stat-icon { font-size:1.8rem; margin-bottom:10px; }
+  .stat-num { font-family:'Syne',sans-serif; font-weight:800; font-size:2.8rem; color:#fff; line-height:1; }
+  .stat-lbl { color:rgba(255,255,255,0.5); font-size:0.85rem; margin-top:6px; }
+
+  /* ── HOW IT WORKS ── */
+  #how {
+    padding: 90px 5%;
+    background: var(--gray-bg);
+  }
+  .section-title { text-align:center; margin-bottom:55px; }
+  .section-title h2 { font-size:clamp(1.6rem,3vw,2.4rem); font-weight:800; color:var(--blue-deep); }
+  .section-title p { color:var(--text-lite); margin-top:10px; font-size:1rem; }
+
+  .steps-row { display:flex; gap:0; max-width:1100px; margin:0 auto; position:relative; }
+  .steps-row::before {
+    content:''; position:absolute; top:36px; left:10%; right:10%; height:2px;
+    background: linear-gradient(90deg, var(--blue-sky), var(--blue-lite));
+    z-index:0;
+  }
+  .step-card {
+    flex:1; text-align:center; padding:0 20px; position:relative; z-index:1;
+  }
+  .step-icon {
+    width:72px; height:72px; border-radius:50%; margin:0 auto 18px;
+    background: linear-gradient(135deg, var(--blue-mid), var(--blue-sky));
+    display:flex; align-items:center; justify-content:center;
+    font-size:1.6rem; color:#fff;
+    box-shadow: 0 8px 28px rgba(30,111,217,0.35);
+    border: 4px solid var(--gray-bg);
+    transition: transform .3s, box-shadow .3s;
+  }
+  .step-card:hover .step-icon { transform:scale(1.12); box-shadow: 0 14px 40px rgba(30,111,217,0.45); }
+  .step-num { position:absolute; top:-6px; right:calc(50% - 44px); width:22px; height:22px; background:var(--blue-sky); color:#fff; border-radius:50%; font-size:0.7rem; font-family:'Syne',sans-serif; font-weight:800; display:flex; align-items:center; justify-content:center; }
+  .step-card h4 { font-size:1rem; font-weight:700; margin-bottom:8px; color:var(--blue-deep); }
+  .step-card p { font-size:0.85rem; color:var(--text-lite); line-height:1.5; }
+
+  /* ── BOOKING ── */
+  #booking {
+    padding: 90px 5%;
+    background: linear-gradient(160deg, var(--blue-deep) 0%, var(--blue-mid) 100%);
+    position: relative; overflow: hidden;
+  }
+  #booking::before {
+    content:''; position:absolute; width:600px; height:600px;
+    background: radial-gradient(circle, rgba(30,111,217,0.2), transparent 70%);
+    top:-200px; right:-200px; border-radius:50%;
+  }
+
+  .booking-grid { display:grid; grid-template-columns:1fr 1fr; gap:50px; max-width:1100px; margin:0 auto; align-items:start; }
+  .booking-info h2 { font-size:clamp(1.5rem,3vw,2.2rem); color:#fff; font-weight:800; margin-bottom:16px; }
+  .booking-info p { color:rgba(255,255,255,0.65); line-height:1.7; margin-bottom:30px; }
+
+  .info-list { list-style:none; }
+  .info-list li { display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid rgba(255,255,255,0.08); color:rgba(255,255,255,0.8); font-size:0.9rem; }
+  .info-list li i { width:32px; height:32px; background:rgba(255,255,255,0.1); border-radius:8px; display:flex; align-items:center; justify-content:center; color:var(--blue-lite); flex-shrink:0; }
+
+  .form-card {
+    background: #fff; border-radius: 20px; padding: 36px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.3);
+  }
+  .form-card h3 { font-size:1.25rem; font-weight:800; color:var(--blue-deep); margin-bottom:24px; }
+
+  .form-row { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .form-group { margin-bottom:16px; }
+  .form-group label { display:block; font-size:0.8rem; font-weight:600; color:var(--text-mid); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px; }
+  .form-group input, .form-group select {
+    width:100%; padding:12px 14px; border:1.5px solid var(--gray-lite); border-radius:10px;
+    font-family:'DM Sans',sans-serif; font-size:0.95rem; color:var(--text-dark);
+    background:#fff; transition:border-color .2s, box-shadow .2s; outline:none;
+  }
+  .form-group input:focus, .form-group select:focus { border-color:var(--blue-sky); box-shadow:0 0 0 3px rgba(30,111,217,0.1); }
+  .form-group .plate-input {
+    font-family:'Syne',sans-serif; font-weight:700; font-size:1.1rem;
+    text-transform:uppercase; letter-spacing:2px; text-align:center;
+    background:linear-gradient(135deg,#f0f6ff,#e8f0ff); border-color:var(--blue-lite);
+  }
+
+  .btn-book {
+    width:100%; padding:15px; border-radius:12px; border:none; cursor:pointer;
+    background:linear-gradient(135deg,var(--blue-sky),var(--blue-lite));
+    color:#fff; font-family:'Syne',sans-serif; font-weight:700; font-size:1rem;
+    letter-spacing:0.5px; transition:all .25s;
+    box-shadow: 0 8px 24px rgba(30,111,217,0.4);
+    display:flex; align-items:center; justify-content:center; gap:8px;
+  }
+  .btn-book:hover { transform:translateY(-2px); box-shadow:0 14px 36px rgba(30,111,217,0.5); }
+
+  /* BOOKING RESULT */
+  #booking-result {
+    display:none; background:linear-gradient(135deg,#e8f5ee,#d4edda);
+    border:1px solid #b8dfc8; border-radius:14px; padding:22px;
+    margin-top:20px;
+  }
+  #booking-result.show { display:block; animation:slideIn .4s ease; }
+  @keyframes slideIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+  .result-header { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  .result-header i { font-size:1.4rem; color:var(--green); }
+  .result-header h4 { font-weight:700; color:#155724; font-size:1rem; }
+  .result-row { display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px solid rgba(0,0,0,0.06); font-size:0.88rem; }
+  .result-row .rl { color:var(--text-lite); }
+  .result-row .rv { font-weight:600; color:var(--text-dark); }
+  .status-badge { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:100px; font-size:0.75rem; font-weight:700; }
+  .status-badge.reserved { background:rgba(0,201,122,0.15); color:var(--green); }
+
+  /* ── SLOT GRID ── */
+  #slots-section {
+    padding: 90px 5%;
+    background: #fff;
+  }
+  #slotGrid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+    gap: 10px; max-width: 1100px; margin: 0 auto;
+  }
+  .slot-cell {
+    aspect-ratio: 0.65; border-radius: 10px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3px; font-family:'Syne',sans-serif; font-weight:700; font-size:0.75rem;
+    transition: transform .15s, box-shadow .15s; border: 1.5px solid transparent;
+  }
+  .slot-cell:hover { transform: scale(1.06); box-shadow: 0 6px 20px rgba(30,111,217,0.2); }
+  .slot-cell.available  { background:#e8f7f0; border-color:#a8dfc0; color:#008050; }
+  .slot-cell.occupied   { background:#ffeef1; border-color:#ffc4cc; color:#c0003c; }
+  .slot-cell.reserved   { background:#fff5e0; border-color:#ffd98a; color:#b07000; }
+  .slot-cell.selected   { background:var(--blue-sky); border-color:var(--blue-sky); color:#fff; box-shadow:0 6px 20px rgba(30,111,217,0.4); }
+  .slot-cell .slot-id   { font-size:0.85rem; }
+  .slot-cell .slot-st   { font-size:0.62rem; font-weight:400; opacity:0.7; text-transform:uppercase; letter-spacing:0.5px; }
+
+  .slot-legend { display:flex; gap:24px; justify-content:center; margin-bottom:30px; flex-wrap:wrap; }
+  .leg-item { display:flex; align-items:center; gap:7px; font-size:0.85rem; color:var(--text-mid); }
+  .leg-dot { width:12px; height:12px; border-radius:3px; }
+  .leg-dot.avail { background:#a8dfc0; }
+  .leg-dot.occ   { background:#ffc4cc; }
+  .leg-dot.res   { background:#ffd98a; }
+
+
+  .slot-cell .slot-plate {
+    font-size: 0.58rem;
+    font-weight: 600;
+    opacity: 0.85;
+    margin-top: 2px;
+  }
+
+  .recent-activity-box {
+    max-width: 1100px;
+    margin: 30px auto 0;
+    background: #fff;
+    border: 1px solid var(--gray-lite);
+    border-radius: 16px;
+    padding: 22px;
+    box-shadow: var(--card-shadow);
+  }
+
+  .recent-activity-box h3 {
+    font-size: 1.1rem;
+    margin-bottom: 14px;
+    color: var(--blue-deep);
+  }
+
+  .activity-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--gray-lite);
+    font-size: 0.9rem;
+  }
+
+  .activity-item:last-child { border-bottom: none; }
+
+  .activity-left {
+    font-weight: 700;
+    color: var(--blue-deep);
+  }
+
+  .activity-status {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 0.72rem;
+    padding: 5px 10px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+
+  .activity-status.available { background:#e8f7f0; color:#008050; }
+  .activity-status.reserved { background:#fff5e0; color:#b07000; }
+  .activity-status.occupied { background:#ffeef1; color:#c0003c; }
+  .activity-status.paid { background:#e8f0ff; color:var(--blue-sky); }
+  .activity-time {
+    color: var(--text-lite);
+    font-size: 0.78rem;
+    margin-top: 3px;
+  }
+
+  /* ── CHECK BOOKING ── */
+  #check {
+    padding: 90px 5%;
+    background: var(--gray-bg);
+  }
+  .check-box {
+    max-width: 520px; margin: 0 auto;
+    background: #fff; border-radius: 20px; padding: 40px;
+    box-shadow: var(--card-shadow);
+    text-align: center;
+  }
+  .plate-display {
+    background: linear-gradient(135deg, var(--blue-deep), var(--blue-mid));
+    border-radius: 12px; padding: 18px; margin-bottom: 24px;
+    font-family:'Syne',sans-serif; font-weight:800; font-size:2rem;
+    color:#fff; letter-spacing:4px; text-align:center;
+    box-shadow: 0 8px 28px rgba(10,31,68,0.3);
+  }
+  .check-input-row { display:flex; gap:10px; }
+  .check-input-row input {
+    flex:1; padding:13px 16px; border:1.5px solid var(--gray-lite); border-radius:10px;
+    font-family:'Syne',sans-serif; font-weight:700; font-size:1rem; text-transform:uppercase;
+    letter-spacing:2px; outline:none; text-align:center; transition:border-color .2s;
+  }
+  .check-input-row input:focus { border-color:var(--blue-sky); }
+  .btn-check {
+    padding:13px 22px; background:var(--blue-sky); color:#fff; border:none;
+    border-radius:10px; cursor:pointer; font-family:'Syne',sans-serif; font-weight:700;
+    transition:all .2s; white-space:nowrap;
+  }
+  .btn-check:hover { background:var(--blue-mid); transform:translateY(-2px); }
+  #lookup-result { margin-top:20px; }
+
+  .pay-btn { width:100%; margin-top:14px; padding:13px; border:none; border-radius:12px; background:var(--green); color:#fff; font-weight:700; font-size:1rem; cursor:pointer; }
+  .pay-btn:disabled { opacity:.6; cursor:wait; }
+  .pay-done { margin-top:14px; padding:12px 14px; border-radius:12px; background:#e8f7f0; color:#008050; font-weight:600; font-size:.9rem; }
+  #pay-modal { position:fixed; inset:0; background:rgba(10,31,68,.65); display:flex; align-items:center; justify-content:center; z-index:9999; padding:16px; }
+  .pay-card { background:#fff; border-radius:18px; padding:24px; width:100%; max-width:380px; color:#0A1F44; }
+  .pay-card h3 { margin:0 0 6px; }
+  .pay-note { font-size:.8rem; color:#6b7a99; margin:0 0 14px; }
+  .pay-sum { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #e6ecf5; }
+  .pay-card label { display:block; font-size:.8rem; margin-top:12px; color:#6b7a99; }
+  .pay-card input { width:100%; margin-top:4px; padding:10px; border:1px solid #cfd9ea; border-radius:10px; font-size:1rem; box-sizing:border-box; }
+  .pay-two { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .pay-cancel { width:100%; margin-top:8px; padding:10px; border:none; background:none; color:#6b7a99; cursor:pointer; }
+  .lookup-card { background:var(--gray-bg); border-radius:12px; padding:18px; text-align:left; }
+  .lookup-card .lk-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--gray-lite); font-size:0.9rem; }
+  .lookup-card .lk-row:last-child { border:none; }
+  .lk-label { color:var(--text-lite); }
+  .lk-value { font-weight:600; }
+
+  /* ── LIVE INFO STRIP ── */
+  #info-strip {
+    background: linear-gradient(135deg, var(--blue-sky), var(--blue-deep));
+    padding: 30px 5%;
+    overflow: hidden; position: relative;
+  }
+  .strip-inner { display:flex; gap:0; max-width:1100px; margin:0 auto; }
+  .strip-item { flex:1; text-align:center; padding:0 20px; border-right:1px solid rgba(255,255,255,0.15); }
+  .strip-item:last-child { border:none; }
+  .strip-num { font-family:'Syne',sans-serif; font-weight:800; font-size:2rem; color:#fff; }
+  .strip-lbl { font-size:0.78rem; color:rgba(255,255,255,0.6); margin-top:3px; }
+
+  /* ── FEATURES ── */
+  #features { padding:90px 5%; background:#fff; }
+  .features-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:24px; max-width:1100px; margin:0 auto; }
+  .feat-card {
+    padding:32px 28px; border-radius:18px; background:var(--gray-bg);
+    border:1px solid var(--gray-lite); transition:all .3s;
+    position:relative; overflow:hidden;
+  }
+  .feat-card::after {
+    content:''; position:absolute; bottom:0; left:0; right:0; height:3px;
+    background:linear-gradient(90deg,var(--blue-sky),var(--blue-lite));
+    transform:scaleX(0); transition:transform .3s; transform-origin:left;
+  }
+  .feat-card:hover { transform:translateY(-6px); box-shadow:var(--card-hover); background:#fff; }
+  .feat-card:hover::after { transform:scaleX(1); }
+  .feat-icon { width:52px; height:52px; border-radius:14px; margin-bottom:18px; display:flex; align-items:center; justify-content:center; font-size:1.3rem; }
+  .feat-card h4 { font-size:1rem; font-weight:700; margin-bottom:8px; color:var(--blue-deep); }
+  .feat-card p { font-size:0.85rem; color:var(--text-lite); line-height:1.6; }
+
+  /* ── WHY SECTION ── */
+  #why { padding:90px 5%; background:var(--gray-bg); }
+  .why-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:24px; max-width:1100px; margin:0 auto; }
+  .why-card {
+    background:#fff; border-radius:18px; padding:36px 28px;
+    box-shadow:var(--card-shadow); text-align:center; transition:all .3s;
+    border:1px solid var(--gray-lite);
+  }
+  .why-card:hover { transform:translateY(-6px); box-shadow:var(--card-hover); }
+  .why-card .big-num { font-family:'Syne',sans-serif; font-weight:800; font-size:3rem; color:var(--blue-lite); opacity:0.2; line-height:1; margin-bottom:8px; }
+  .why-card h4 { font-size:1rem; font-weight:700; color:var(--blue-deep); margin-bottom:10px; }
+  .why-card p { font-size:0.85rem; color:var(--text-lite); line-height:1.6; }
+
+  /* ── FAQ ── */
+  #faq { padding:90px 5%; background:#fff; }
+  .faq-list { max-width:720px; margin:0 auto; }
+  .faq-item { border-bottom:1px solid var(--gray-lite); }
+  .faq-q {
+    width:100%; text-align:left; padding:20px 0; background:none; border:none;
+    font-family:'Syne',sans-serif; font-size:0.95rem; font-weight:700; color:var(--blue-deep);
+    cursor:pointer; display:flex; justify-content:space-between; align-items:center;
+    transition:color .2s;
+  }
+  .faq-q:hover { color:var(--blue-sky); }
+  .faq-q i { transition:transform .3s; color:var(--blue-sky); }
+  .faq-a { max-height:0; overflow:hidden; transition:max-height .35s ease; }
+  .faq-a p { padding:0 0 16px; font-size:0.9rem; color:var(--text-mid); line-height:1.7; }
+  .faq-item.open .faq-q i { transform:rotate(180deg); }
+  .faq-item.open .faq-a { max-height:200px; }
+
+  /* ── PYTHON API INFO ── */
+  #api-info {
+    padding: 80px 5%;
+    background: linear-gradient(135deg, #0A1F44, #1A3A6B);
+  }
+  .api-grid { display:grid; grid-template-columns:1fr 1fr; gap:50px; max-width:1100px; margin:0 auto; align-items:center; }
+  .api-info-text h2 { font-size:clamp(1.4rem,2.5vw,2rem); font-weight:800; color:#fff; margin-bottom:14px; }
+  .api-info-text p { color:rgba(255,255,255,0.65); line-height:1.7; margin-bottom:20px; }
+  .endpoint-list { list-style:none; }
+  .endpoint-list li { display:flex; align-items:center; gap:10px; padding:10px 14px; background:rgba(255,255,255,0.06); border-radius:8px; margin-bottom:8px; font-size:0.85rem; color:#fff; border-left:3px solid var(--blue-lite); }
+  .endpoint-list li code { font-family:monospace; color:var(--blue-glow); margin-left:auto; font-size:0.8rem; }
+  .code-card {
+    background:#0D1B2E; border-radius:14px; padding:24px;
+    border:1px solid rgba(255,255,255,0.1);
+    box-shadow: 0 20px 50px rgba(0,0,0,0.4);
+    font-family:monospace; font-size:0.8rem; line-height:1.8;
+    color:#a8d8ff; overflow-x:auto;
+  }
+  .code-card .cc-comment { color:#4a7080; }
+  .code-card .cc-kw { color:#ff79c6; }
+  .code-card .cc-str { color:#f1fa8c; }
+  .code-card .cc-fn { color:#50fa7b; }
+  .code-card .cc-num { color:#bd93f9; }
+
+  /* ── FOOTER ── */
+  footer {
+    background: var(--blue-deep); padding:50px 5% 30px;
+    border-top:1px solid rgba(255,255,255,0.08);
+  }
+  .footer-grid { display:grid; grid-template-columns:2fr 1fr 1fr; gap:50px; max-width:1100px; margin:0 auto 40px; }
+  .footer-brand .logo-text-f { font-family:'Syne',sans-serif; font-weight:800; font-size:1.4rem; color:#fff; margin-bottom:10px; }
+  .footer-brand .logo-text-f span { color:var(--blue-lite); }
+  .footer-brand p { color:rgba(255,255,255,0.5); font-size:0.88rem; line-height:1.7; max-width:300px; }
+  .footer-col h5 { font-family:'Syne',sans-serif; font-weight:700; color:#fff; margin-bottom:16px; font-size:0.9rem; letter-spacing:0.5px; }
+  .footer-col ul { list-style:none; }
+  .footer-col ul li { margin-bottom:10px; }
+  .footer-col ul li a { color:rgba(255,255,255,0.5); text-decoration:none; font-size:0.87rem; transition:color .2s; }
+  .footer-col ul li a:hover { color:var(--blue-lite); }
+  .footer-bottom { border-top:1px solid rgba(255,255,255,0.08); padding-top:24px; display:flex; justify-content:space-between; align-items:center; max-width:1100px; margin:0 auto; flex-wrap:wrap; gap:10px; }
+  .footer-bottom p { color:rgba(255,255,255,0.35); font-size:0.82rem; }
+  .footer-socials { display:flex; gap:12px; }
+  .footer-socials a { width:36px; height:36px; background:rgba(255,255,255,0.07); border-radius:8px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,0.5); text-decoration:none; transition:all .2s; }
+  .footer-socials a:hover { background:var(--blue-sky); color:#fff; transform:translateY(-2px); }
+
+  /* ── TOAST ── */
+  #toast { position:fixed; bottom:24px; right:24px; z-index:9999; }
+  .toast-msg {
+    padding:12px 20px; border-radius:10px; font-size:0.88rem; font-weight:500;
+    margin-top:8px; display:flex; align-items:center; gap:8px;
+    box-shadow:0 8px 28px rgba(0,0,0,0.2); animation:slideIn .3s ease;
+  }
+  .toast-msg.success { background:#155724; color:#d4edda; }
+  .toast-msg.error { background:#721c24; color:#f8d7da; }
+
+  /* ── LOADER ── */
+  #loader {
+    display:none; position:fixed; inset:0; z-index:9998;
+    background:rgba(10,31,68,0.5); backdrop-filter:blur(4px);
+    align-items:center; justify-content:center;
+  }
+  #loader.show { display:flex; }
+  .spin { width:48px; height:48px; border:4px solid rgba(255,255,255,0.2); border-top-color:#fff; border-radius:50%; animation:spin .8s linear infinite; }
+  @keyframes spin { to{transform:rotate(360deg)} }
+
+  /* ── RESPONSIVE ── */
+  @media(max-width:900px) {
+    .hero-grid { grid-template-columns:1fr; gap:40px; }
+    .hero-right { order:-1; }
+    .parking-3d { max-width:400px; margin:0 auto; }
+    .stats-grid { grid-template-columns:repeat(2,1fr); }
+    .booking-grid { grid-template-columns:1fr; }
+    .features-grid, .why-grid { grid-template-columns:repeat(2,1fr); }
+    .api-grid { grid-template-columns:1fr; }
+    .footer-grid { grid-template-columns:1fr 1fr; }
+    .steps-row::before { display:none; }
+    .strip-inner { flex-wrap:wrap; gap:20px; }
+    .strip-item { min-width:40%; border:none; }
+    .photo-cards { position:static; transform:none; flex-wrap:wrap; justify-content:center; margin-top:-30px; }
+  }
+  @media(max-width:600px) {
+    nav { padding:0 4%; }
+    .nav-links { display:none; }
+    .stats-grid, .features-grid, .why-grid { grid-template-columns:1fr; }
+    .form-row { grid-template-columns:1fr; }
+    .photo-cards { gap:10px; }
+    .footer-grid { grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- LOADER -->
+<div id="loader"><div class="spin"></div></div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+
+<!-- ─── NAVBAR ─── -->
+<nav>
+  <a href="#" class="nav-logo">
+    <div class="logo-icon">
+      <svg viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="4" y="2" width="14" height="18" rx="3" stroke="white" stroke-width="2"/>
+        <path d="M8 7h5a3 3 0 010 6H8V7z" fill="white"/>
+        <path d="M13 20l1 3" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+        <circle cx="13" cy="23" r="1.5" fill="white"/>
+      </svg>
+    </div>
+    <span class="logo-text">Park<span>Ease</span></span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="#how">How it Works</a></li>
+    <li><a href="#booking">Book Now</a></li>
+    <li><a href="#check">Check Status</a></li>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#faq">FAQ</a></li>
+    <li><a href="assistant.html">AI Assistant 🤖</a></li>
+  </ul>
+  <button class="nav-cta" onclick="scrollToBooking()">Book a Slot</button>
+  <select id="lang" onchange="setLang(this.value)">
+  <option value="en">English</option>
+  <option value="si">සිංහල</option>
+  <option value="ta">தமிழ்</option>
+</select>
+</nav>
+
+<!-- ─── HERO ─── -->
+<section id="hero">
+  <div class="hero-shape hs1"></div>
+  <div class="hero-shape hs2"></div>
+  <div class="hero-shape hs3"></div>
+
+  <div class="hero-grid">
+    <div class="hero-left">
+      <div class="hero-badge">
+        <span class="dot"></span> Live Slot Monitoring Active
+      </div>
+      <h1 class="hero-h1">Book Your<br><span>Parking Slot</span><br>in Seconds</h1>
+      <p class="hero-tagline">Park Smart. Arrive Easy. Leave Smooth.<br>Sri Lanka's smartest parking booking platform.</p>
+      <div class="hero-btns">
+        <button class="btn-primary" onclick="scrollToBooking()"><i class="fas fa-parking"></i> Book Parking</button>
+        <button class="btn-outline" onclick="document.getElementById('check').scrollIntoView({behavior:'smooth'})"><i class="fas fa-search"></i> Check Availability</button>
+      </div>
+      <div class="trust-row">
+        <div class="trust-item"><i class="fas fa-check-circle"></i> Instant Booking</div>
+        <div class="trust-item"><i class="fas fa-check-circle"></i> Live Slot Updates</div>
+        <div class="trust-item"><i class="fas fa-check-circle"></i> Smart Vehicle Detection</div>
+        <div class="trust-item"><i class="fas fa-check-circle"></i> Fast Entry System</div>
+      </div>
+    </div>
+
+    <div class="hero-right">
+      <div class="parking-3d">
+        <div class="live-badge"><span class="dot" style="background:var(--green)"></span> Live Status</div>
+        <div class="p3d-title">🅿 Parking Floor A — Level 1</div>
+        <div class="hero-image-box">
+          <img src="skynews-car-park-parking-cars_6515366.jpg" alt="Parking Lot">
+        <div class="hero-image-overlay">
+          Live Parking Overview
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── REAL PARKING PHOTO — SRI LANKA ─── -->
+<section id="real-photo">
+  <div class="photo-strip">
+    <div class="photo-overlay"></div>
+    <div class="photo-content">
+      <h2>Real Parking. Real Smart.</h2>
+      <p>Modern parking management for Sri Lanka's growing cities</p>
+      <span class="photo-tag">📍 Colombo, Sri Lanka</span>
+    </div>
+  </div>
+  <div style="background:var(--blue-deep); padding:40px 5% 20px; display:flex; justify-content:center; gap:20px; flex-wrap:wrap;">
+    <div class="photo-card">
+      <div class="pc-num">50+</div>
+      <div class="pc-lbl">Total Slots</div>
+    </div>
+    <div class="photo-card">
+      <div class="pc-num" style="color:var(--green)">23</div>
+      <div class="pc-lbl">Available Now</div>
+    </div>
+    <div class="photo-card">
+      <div class="pc-num" style="color:var(--amber)">142</div>
+      <div class="pc-lbl">Today's Bookings</div>
+    </div>
+    <div class="photo-card">
+      <div class="pc-num" style="color:var(--red)">2 min</div>
+      <div class="pc-lbl">Avg Wait Time</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── LIVE STATS ─── -->
+<section id="stats">
+  <div style="max-width:1200px;margin:0 auto;text-align:center;margin-bottom:36px;">
+    <h2 style="color:#fff;font-size:clamp(1.5rem,3vw,2.2rem);font-weight:800;">Live Parking Status</h2>
+    <p style="color:rgba(255,255,255,0.5);margin-top:8px;">Updated every 10 seconds via Firebase</p>
+  </div>
+  <div class="stats-grid">
+    <div class="stat-card blue">
+      <div class="stat-icon">🅿️</div>
+      <div class="stat-num" id="c-total">0</div>
+      <div class="stat-lbl">Total Slots</div>
+    </div>
+    <div class="stat-card green">
+      <div class="stat-icon">🟢</div>
+      <div class="stat-num" id="c-avail">0</div>
+      <div class="stat-lbl">Available</div>
+    </div>
+    <div class="stat-card red">
+      <div class="stat-icon">🔴</div>
+      <div class="stat-num" id="c-occup">0</div>
+      <div class="stat-lbl">Occupied</div>
+    </div>
+    <div class="stat-card amber">
+      <div class="stat-icon">🟡</div>
+      <div class="stat-num" id="c-reser">0</div>
+      <div class="stat-lbl">Reserved</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── HOW IT WORKS ─── -->
+<section id="how">
+  <div class="section-title">
+    <h2>How It Works</h2>
+    <p>Book your parking slot in 4 simple steps — no app needed</p>
+  </div>
+  <div class="steps-row">
+    <div class="step-card">
+      <div class="step-num">1</div>
+      <div class="step-icon"><i class="fas fa-car"></i></div>
+      <h4>Enter Number Plate</h4>
+      <p>Your vehicle plate is your unique ID — no login needed</p>
+    </div>
+    <div class="step-card">
+      <div class="step-num">2</div>
+      <div class="step-icon"><i class="fas fa-parking"></i></div>
+      <h4>Select Available Slot</h4>
+      <p>See live slots in real-time and pick one that suits you</p>
+    </div>
+    <div class="step-card">
+      <div class="step-num">3</div>
+      <div class="step-icon"><i class="fas fa-check-circle"></i></div>
+      <h4>Confirm Booking</h4>
+      <p>Instant confirmation with your Booking ID and slot details</p>
+    </div>
+    <div class="step-card">
+      <div class="step-num">4</div>
+      <div class="step-icon"><i class="fas fa-camera"></i></div>
+      <h4>Arrive & Auto-Entry</h4>
+      <p>ANPR camera reads your plate — gate opens automatically</p>
+    </div>
+  </div>
+</section>
+
+<!-- ─── BOOKING SECTION ─── -->
+<section id="booking">
+  <div class="booking-grid">
+    <div class="booking-info">
+      <h2>Book Your Parking Slot Now</h2>
+      <p>Fill in your details below and we'll reserve your slot instantly. Our system notifies the entry gate automatically.</p>
+      <ul class="info-list">
+        <li><i class="fas fa-bolt"></i> Instant reservation — no delay</li>
+        <li><i class="fas fa-shield-alt"></i> Your data is securely stored in Firebase</li>
+        <li><i class="fas fa-robot"></i> ANPR system auto-detects your plate</li>
+        <li><i class="fas fa-clock"></i> Arrival time alerts the parking system</li>
+        <li><i class="fas fa-exchange-alt"></i> Modify or cancel anytime via plate lookup</li>
+      </ul>
+    </div>
+
+    <div class="form-card">
+      <h3>🅿 New Parking Booking</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Full Name</label>
+          <input id="b-name" type="text" placeholder="Kasun Perera">
+        </div>
+        <div class="form-group">
+          <label>Phone Number</label>
+          <input id="b-phone" type="tel" placeholder="07X XXX XXXX">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>⭐ Vehicle Number Plate</label>
+        <input id="b-plate" type="text" class="plate-input" placeholder="ABC-1234" maxlength="10">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Vehicle Type</label>
+          <select id="b-vtype">
+            <option value="">— Select —</option>
+            <option value="Car">🚗 Car</option>
+            <option value="Bike">🏍 Motorbike</option>
+            <option value="Van">🚐 Van / SUV</option>
+            <option value="Three-wheeler">🛺 Three-wheeler</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Select Parking Slot</label>
+          <select id="b-slot">
+            <option value="">— Loading live slots —</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>⏱ Estimated Arrival Time</label>
+        <input id="b-arrival" type="time">
+      </div>
+      <button class="btn-book" onclick="window.submitBooking && window.submitBooking()">
+        <i class="fas fa-parking"></i> Confirm Booking
+      </button>
+      <div id="booking-result"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLOT VISUAL GRID ─── -->
+<section id="slots-section">
+  <div class="section-title">
+    <h2>Live Slot Map</h2>
+    <p>Tap an available slot to auto-fill the booking form</p>
+  </div>
+  <div class="slot-legend">
+    <div class="leg-item"><div class="leg-dot avail"></div> Available</div>
+    <div class="leg-item"><div class="leg-dot occ"></div> Occupied</div>
+    <div class="leg-item"><div class="leg-dot res"></div> Reserved</div>
+  </div>
+  <div id="slotGrid"></div>
+
+  <div class="recent-activity-box">
+    <h3>Recent Slot Activity</h3>
+    <div id="slotActivityList">Waiting for Firebase live activity...</div>
+  </div>
+</section>
+
+<!-- ─── CHECK BOOKING ─── -->
+<section id="check">
+  <div class="section-title">
+    <h2>Check Your Parking Status</h2>
+    <p>Enter your vehicle number plate to get your booking details</p>
+  </div>
+  <div class="check-box">
+    <div class="plate-display" id="plateDisplay">WP · ABC · 1234</div>
+    <div class="check-input-row">
+      <input id="lookup-plate" type="text" placeholder="ABC-1234" maxlength="10"
+        oninput="document.getElementById('plateDisplay').textContent = this.value.toUpperCase() || 'WP · ABC · 1234'"
+        onkeydown="if(event.key==='Enter')window.checkPlate&&window.checkPlate()">
+      <button class="btn-check" onclick="window.checkPlate && window.checkPlate()"><i class="fas fa-search"></i> Check</button>
+    </div>
+    <div id="lookup-result"></div>
+  </div>
+</section>
+
+<!-- ─── LIVE INFO STRIP ─── -->
+<section id="info-strip">
+  <div class="strip-inner">
+    <div class="strip-item">
+      <div class="strip-num" id="s-today">0</div>
+      <div class="strip-lbl">Vehicles Today</div>
+    </div>
+    <div class="strip-item">
+      <div class="strip-num" id="s-active">0</div>
+      <div class="strip-lbl">Active Bookings</div>
+    </div>
+    <div class="strip-item">
+      <div class="strip-num" id="s-slots">0</div>
+      <div class="strip-lbl">Slots Available</div>
+    </div>
+    <div class="strip-item">
+      <div class="strip-num">14:00–17:00</div>
+      <div class="strip-lbl">⚡ Peak Hours Today</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── FEATURES ─── -->
+<section id="features">
+  <div class="section-title">
+    <h2>Platform Features</h2>
+    <p>Everything you need for smart, modern parking management</p>
+  </div>
+  <div class="features-grid">
+    <div class="feat-card">
+      <div class="feat-icon" style="background:#e8f0ff;color:var(--blue-sky)"><i class="fas fa-car"></i></div>
+      <h4>Smart Vehicle Detection</h4>
+      <p>ANPR (Automatic Number Plate Recognition) reads plates and controls gate entry automatically via our Python backend.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:#e8f7f0;color:var(--green)"><i class="fas fa-broadcast-tower"></i></div>
+      <h4>Real-Time Slot Updates</h4>
+      <p>Firebase Realtime Database syncs slot status across all users in milliseconds — always accurate, always live.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:#fff5e0;color:var(--amber)"><i class="fas fa-bolt"></i></div>
+      <h4>Instant Booking System</h4>
+      <p>Book your slot in under 10 seconds with our streamlined form — no account required, just your number plate.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:#ffeef1;color:var(--red)"><i class="fas fa-shield-alt"></i></div>
+      <h4>Secure Data Storage</h4>
+      <p>All booking and vehicle data encrypted and stored securely in Firebase with Realtime Database security rules.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:#e8f0ff;color:var(--blue-sky)"><i class="fas fa-satellite-dish"></i></div>
+      <h4>Live Parking Monitoring</h4>
+      <p>Python backend with OpenCV continuously monitors the parking lot and updates Firebase in real-time.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:#f0e8ff;color:#8060ff)"><i class="fas fa-brain" style="color:#8060ff"></i></div>
+      <h4>AI-Based Entry Recognition</h4>
+      <p>TensorFlow / EasyOCR model trained on Sri Lankan number plates for 98%+ detection accuracy.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ─── WHY PARKEASE ─── -->
+<section id="why">
+  <div class="section-title">
+    <h2>Why ParkEase?</h2>
+    <p>Built specifically for Sri Lanka's parking challenges</p>
+  </div>
+  <div class="why-grid">
+    <div class="why-card">
+      <div class="big-num">01</div>
+      <h4>No More Waiting</h4>
+      <p>Know your slot before you arrive. Drive in, park, done. No circling, no guessing, no stress.</p>
+    </div>
+    <div class="why-card">
+      <div class="big-num">02</div>
+      <h4>Fully Automated Entry</h4>
+      <p>The gate reads your plate and opens automatically. Zero human involvement — fast and touchless.</p>
+    </div>
+    <div class="why-card">
+      <div class="big-num">03</div>
+      <h4>Simple for Everyone</h4>
+      <p>Designed so anyone can use it — from tech-savvy professionals to first-time smartphone users.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ─── PYTHON + FIREBASE INTEGRATION INFO ─── -->
+<section id="api-info">
+  <div class="api-grid">
+    <div class="api-info-text">
+      <h2>🔗 Firebase + Python Backend Integration</h2>
+      <p>ParkEase connects your web frontend directly to Firebase Realtime Database for real-time data, and calls a Python FastAPI backend that handles ANPR, gate control, and notifications.</p>
+      <ul class="endpoint-list">
+        <li><i class="fas fa-plus-circle" style="color:var(--green)"></i> Create booking <code>POST /api/booking</code></li>
+        <li><i class="fas fa-search" style="color:var(--blue-lite)"></i> Check vehicle status <code>GET /api/vehicle/{plate}</code></li>
+        <li><i class="fas fa-door-open" style="color:var(--amber)"></i> Trigger gate open <code>POST /api/gate/open</code></li>
+        <li><i class="fas fa-list" style="color:var(--red)"></i> Get all slots <code>GET /api/slots</code></li>
+        <li><i class="fas fa-camera" style="color:#c0a0ff"></i> ANPR detection feed <code>WS /ws/anpr</code></li>
+      </ul>
+    </div>
+    <div class="code-card">
+      <div class="cc-comment"># ── Python FastAPI Backend (main.py) ──</div><br>
+      <span class="cc-kw">from</span> fastapi <span class="cc-kw">import</span> FastAPI<br>
+      <span class="cc-kw">import</span> firebase_admin<br>
+      <span class="cc-kw">from</span> firebase_admin <span class="cc-kw">import</span> firestore<br><br>
+      app = <span class="cc-fn">FastAPI</span>()<br>
+      db  = firestore.<span class="cc-fn">client</span>()<br><br>
+      <span class="cc-comment"># POST /api/booking</span><br>
+      <span class="cc-kw">@</span>app.<span class="cc-fn">post</span>(<span class="cc-str">"/api/booking"</span>)<br>
+      <span class="cc-kw">async def</span> <span class="cc-fn">create_booking</span>(data: dict):<br>
+      &nbsp;&nbsp;db.collection(<span class="cc-str">'bookings'</span>)<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;.<span class="cc-fn">add</span>(data)<br>
+      &nbsp;&nbsp;<span class="cc-kw">return</span> {<span class="cc-str">"status"</span>: <span class="cc-str">"reserved"</span>}<br><br>
+      <span class="cc-comment"># GET /api/vehicle/{plate}</span><br>
+      <span class="cc-kw">@</span>app.<span class="cc-fn">get</span>(<span class="cc-str">"/api/vehicle/{plate}"</span>)<br>
+      <span class="cc-kw">async def</span> <span class="cc-fn">check_vehicle</span>(plate: str):<br>
+      &nbsp;&nbsp;docs = db.collection(<span class="cc-str">'bookings'</span>)<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;.<span class="cc-fn">where</span>(<span class="cc-str">'plate'</span>,<span class="cc-str">'=='</span>,plate)<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;.<span class="cc-fn">get</span>()<br>
+      &nbsp;&nbsp;<span class="cc-kw">return</span> docs[<span class="cc-num">0</span>].<span class="cc-fn">to_dict</span>()
+    </div>
+  </div>
+</section>
+
+<!-- ─── FAQ ─── -->
+<section id="faq">
+  <div class="section-title">
+    <h2>Frequently Asked Questions</h2>
+    <p>Everything you need to know about ParkEase</p>
+  </div>
+  <div class="faq-list">
+    <div class="faq-item open">
+      <button class="faq-q">How do I book a parking slot? <i class="fas fa-chevron-down"></i></button>
+      <div class="faq-a"><p>Fill out the booking form with your name, phone number, vehicle plate, type, preferred slot, and estimated arrival time. Hit "Confirm Booking" and you'll get an instant Booking ID.</p></div>
+    </div>
+    <div class="faq-item">
+      <button class="faq-q">Can I change or cancel my booking? <i class="fas fa-chevron-down"></i></button>
+      <div class="faq-a"><p>Yes — go to "Check Your Parking Status", enter your plate number, and you'll see options to modify your arrival time or cancel the reservation up to 15 minutes before.</p></div>
+    </div>
+    <div class="faq-item">
+      <button class="faq-q">How is entry verified at the gate? <i class="fas fa-chevron-down"></i></button>
+      <div class="faq-a"><p>Our Python-powered ANPR (Automatic Number Plate Recognition) camera reads your number plate as you approach. If you have an active booking, the gate opens automatically.</p></div>
+    </div>
+    <div class="faq-item">
+      <button class="faq-q">What if all slots are full? <i class="fas fa-chevron-down"></i></button>
+      <div class="faq-a"><p>The live slot map will show all slots in red. You can check back in a few minutes as bookings are time-based and slots free up when vehicles leave.</p></div>
+    </div>
+    <div class="faq-item">
+      <button class="faq-q">Can I check my booking using just my number plate? <i class="fas fa-chevron-down"></i></button>
+      <div class="faq-a"><p>Absolutely! That's the primary lookup method. Go to "Check Status", type your plate (e.g. ABC-1234), and see your full booking details, slot, and entry status in real-time.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── FOOTER ─── -->
+<footer>
+  <div class="footer-grid">
+    <div class="footer-brand">
+      <div class="logo-text-f">Park<span>Ease</span></div>
+      <p>Sri Lanka's smart parking booking platform. Park Smart. Arrive Easy. Leave Smooth.</p>
+    </div>
+    <div class="footer-col">
+      <h5>Platform</h5>
+      <ul>
+        <li><a href="#booking">Book a Slot</a></li>
+        <li><a href="#check">Check Status</a></li>
+        <li><a href="#slots-section">Slot Map</a></li>
+        <li><a href="#how">How It Works</a></li>
+      </ul>
+    </div>
+    <div class="footer-col">
+      <h5>About</h5>
+      <ul>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#api-info">API Docs</a></li>
+        <li><a href="#faq">FAQ</a></li>
+        <li><a href="#">Contact Us</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <p>© 2025 ParkEase · Built in Sri Lanka 🇱🇰 · Firebase + Python Powered</p>
+    <div class="footer-socials">
+      <a href="#"><i class="fab fa-facebook-f"></i></a>
+      <a href="#"><i class="fab fa-instagram"></i></a>
+      <a href="#"><i class="fab fa-github"></i></a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// ── DEMO SLOTS (used when Firebase not connected) ──
+function buildDemoSlots() {
+  // Demo mode also uses ONLY 4 slots.
+  const slots = {
+    "A-01": { id: "A-01", status: "available", plate: "", updatedAt: new Date().toISOString() },
+    "A-02": { id: "A-02", status: "available", plate: "", updatedAt: new Date().toISOString() },
+    "A-03": { id: "A-03", status: "reserved", plate: "ABC1234", updatedAt: new Date().toISOString() },
+    "A-04": { id: "A-04", status: "occupied", plate: "", updatedAt: new Date().toISOString() }
+  };
+
+  return slots;
+}
+
+function renderDemoSlots(slots) {
+  const grid = document.getElementById("slotGrid");
+  const select = document.getElementById("b-slot");
+
+  if (grid) grid.innerHTML = "";
+  if (select) select.innerHTML = `<option value="">— Choose Slot —</option>`;
+
+  Object.entries(slots)
+    .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+    .forEach(([slotId, slot]) => {
+      const status = slot.status || "available";
+
+      if (grid) {
+        const el = document.createElement("div");
+        el.className = `slot-cell ${status}`;
+        el.innerHTML = `<span class="slot-id">${slotId}</span>
+                        <span class="slot-st">${status}</span>`;
+        el.onclick = (event) => window.selectSlot(event, slotId, status);
+        grid.appendChild(el);
+      }
+
+      if (select) {
+        const opt = document.createElement("option");
+        opt.value = slotId;
+        opt.dataset.status = status;
+        opt.textContent =
+          status === "available"
+            ? `${slotId} — Available`
+            : `${slotId} — ${status.toUpperCase()}${slot.plate ? " (" + slot.plate + ")" : ""}`;
+        if (status !== "available") opt.disabled = true;
+        select.appendChild(opt);
+      }
+    });
+}
+
+// ── DEMO SLOTS (used when Firebase not connected) ──
+function loadDemoSlots() {
+  const slots = buildDemoSlots();
+  renderDemoSlots(slots);
+
+  animateCounter("c-total", Object.keys(slots).length);
+  animateCounter("c-avail", Object.values(slots).filter(s => s.status === "available").length);
+  animateCounter("c-occup", Object.values(slots).filter(s => s.status === "occupied").length);
+  animateCounter("c-reser", Object.values(slots).filter(s => s.status === "reserved").length);
+}
+
+// ── HERO MINI GRID ──
+function buildHeroGrid() {
+  const grid = document.getElementById("heroSlots");
+  if (!grid) return;
+  const types = ["avail","avail","avail","occup","occup","reserv","avail","occup","avail","avail","reserv","occup","avail","occup","reserv"];
+  const icons = {avail:"🟢",occup:"🔴",reserv:"🟡"};
+  grid.innerHTML = "";
+  types.forEach((t,i) => {
+    const el = document.createElement("div");
+    el.className = `slot-mini ${t}`;
+    el.innerHTML = `${icons[t]}<span>A${String(i+1).padStart(2,"0")}</span>`;
+    grid.appendChild(el);
+  });
+}
+buildHeroGrid();
+
+const i18n = {
+  en: {
+    book:"Book Slot",
+    check:"Check Status"
+  },
+  si: {
+    book:"වෙන්කරන්න",
+    check:"තත්ත්වය බලන්න"
+  },
+  ta: {
+    book:"பதிவு",
+    check:"நிலை சரிபார்க்க"
+  }
+};
+
+function setLang(lang){
+  document.querySelector(".nav-cta").innerText = i18n[lang].book;
+}
+// ── SELECT SLOT ──
+window.selectSlot = function(event, slotId, status) {
+  if (status !== "available") {
+    showToast(`Slot ${slotId} is ${status}. Choose a free slot.`, "error");
+    return;
+  }
+
+  const sel = document.getElementById("b-slot");
+  if (sel) {
+    let opt = [...sel.options].find(o => o.value === slotId);
+
+    if (!opt) {
+      opt = document.createElement("option");
+      opt.value = slotId;
+      opt.textContent = `${slotId} — Available`;
+      opt.dataset.status = "available";
+      sel.appendChild(opt);
+    }
+
+    sel.value = slotId;
+  }
+
+  document.querySelectorAll(".slot-cell").forEach(c => c.classList.remove("selected"));
+  if (event && event.currentTarget) event.currentTarget.classList.add("selected");
+
+  document.getElementById("booking").scrollIntoView({ behavior: "smooth" });
+  showToast(`Free slot ${slotId} selected!`, "success");
+}
+
+// ── ANIMATE COUNTER ──
+function animateCounter(id, target) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  let current = 0;
+  const step = Math.ceil(target / 30);
+  const t = setInterval(() => {
+    current = Math.min(current + step, target);
+    el.textContent = current;
+    if (current >= target) clearInterval(t);
+  }, 30);
+}
+
+// ── SHOW BOOKING RESULT ──
+function showBookingResult(data) {
+  const el = document.getElementById("booking-result");
+  if (!el) return;
+
+  el.innerHTML = `
+    <div class="result-header"><i class="fas fa-check-circle"></i><h4>Booking Confirmed!</h4></div>
+    <div class="result-row"><span class="rl">Booking ID</span><span class="rv">${data.bookingId || '—'}</span></div>
+    <div class="result-row"><span class="rl">Name</span><span class="rv">${data.name || '—'}</span></div>
+    <div class="result-row"><span class="rl">Plate</span><span class="rv">${data.plate || '—'}</span></div>
+    <div class="result-row"><span class="rl">Slot</span><span class="rv">${data.slot || '—'}</span></div>
+    <div class="result-row"><span class="rl">Arrival Time</span><span class="rv">${data.estimatedArrival || '—'}</span></div>
+    <div class="result-row"><span class="rl">Status</span><span class="rv"><span class="status-badge reserved"><span class="dot" style="width:6px;height:6px;background:var(--green);border-radius:50%;display:inline-block"></span> Reserved</span></span></div>
+  `;
+  el.classList.add("show");
+}
+
+// ── SHOW LOOKUP RESULT ──
+const STATUS_TEXT = {
+  booked: "Reserved - not arrived yet",
+  active: "Currently parked",
+  awaiting_payment: "Waiting for payment at exit",
+  completed: "Completed - thank you"
+};
+
+function showLookupResult(data) {
+  const el = document.getElementById("lookup-result");
+  if (!el) return;
+
+  if (!data) {
+    el.innerHTML = `<div style="text-align:center;padding:18px;color:var(--red);font-weight:600"><i class="fas fa-times-circle"></i> No booking found for this plate</div>`;
+    return;
+  }
+
+  const paidText = data.paid === true ? "Yes" : "No";
+  const status = data.status || (data.paid ? "Paid" : "booked");
+  const statusText = STATUS_TEXT[status] || status;
+  const fee = data.fee || (data.bill ? 'Rs.' + data.bill : '—');
+
+  let action = "";
+  if (status === "awaiting_payment" && data.paid !== true) {
+    action = `<button class="pay-btn" onclick="openPayModal('${data.plate}')"><i class="fas fa-credit-card"></i> Pay ${fee}</button>`;
+  } else if (data.paid === true && status === "awaiting_payment") {
+    action = `<div class="pay-done"><i class="fas fa-check-circle"></i> Paid (receipt ${data.receiptId || '—'}). Please go to the exit gate - it will open automatically.</div>`;
+  } else if (status === "completed" && data.paid === true) {
+    action = `<div class="pay-done"><i class="fas fa-check-circle"></i> Paid. Receipt ${data.receiptId || '—'}</div>`;
+  }
+
+  el.innerHTML = `
+    <div class="lookup-card">
+      <div class="lk-row"><span class="lk-label">Booking ID</span><span class="lk-value">${data.bookingId || '—'}</span></div>
+      <div class="lk-row"><span class="lk-label">Name</span><span class="lk-value">${data.name || '—'}</span></div>
+      <div class="lk-row"><span class="lk-label">Plate</span><span class="lk-value">${data.plate || '—'}</span></div>
+      <div class="lk-row"><span class="lk-label">Assigned Slot</span><span class="lk-value">${data.slot || '—'}</span></div>
+      <div class="lk-row"><span class="lk-label">Vehicle Type</span><span class="lk-value">${data.vehicleType || '—'}</span></div>
+      <div class="lk-row"><span class="lk-label">Estimated Arrival</span><span class="lk-value">${data.estimatedArrival || '—'}</span></div>
+      <div class="lk-row"><span class="lk-label">Booking Status</span><span class="lk-value">${statusText}</span></div>
+      <div class="lk-row"><span class="lk-label">Duration</span><span class="lk-value">${data.duration || '—'}</span></div>
+      <div class="lk-row"><span class="lk-label">Fee</span><span class="lk-value">${fee}</span></div>
+      <div class="lk-row"><span class="lk-label">Paid</span><span class="lk-value">${paidText}</span></div>
+    </div>
+    ${action}
+  `;
+}
+
+// ── DEMO PAYMENT WINDOW ──
+function openPayModal(plate) {
+  closePayModal();
+  const box = document.createElement("div");
+  box.id = "pay-modal";
+  box.innerHTML = `
+    <div class="pay-card">
+      <h3><i class="fas fa-lock"></i> Demo payment</h3>
+      <p class="pay-note">This is a demo. No real money is charged and card details are not saved.</p>
+      <div class="pay-sum"><span>Vehicle</span><b>${plate}</b></div>
+      <div class="pay-sum"><span>Amount</span><b id="pay-amount">...</b></div>
+      <label>Card number<input id="pay-card" value="4242 4242 4242 4242" inputmode="numeric"></label>
+      <div class="pay-two">
+        <label>Expiry<input id="pay-exp" value="12/30"></label>
+        <label>CVV<input id="pay-cvv" value="123" maxlength="3"></label>
+      </div>
+      <button class="pay-btn" id="pay-go">Pay now</button>
+      <button class="pay-cancel" onclick="closePayModal()">Cancel</button>
+    </div>`;
+  document.body.appendChild(box);
+  window.fbModules.get(window.fbModules.ref(window.db, "bookings/" + plate)).then(snap => {
+    const d = snap.val() || {};
+    document.getElementById("pay-amount").textContent = d.fee || (d.bill ? "Rs." + d.bill : "—");
+  });
+  document.getElementById("pay-go").onclick = async () => {
+    const btn = document.getElementById("pay-go");
+    btn.disabled = true;
+    btn.textContent = "Processing...";
+    try {
+      await new Promise(r => setTimeout(r, 1800));
+      const receipt = await window.completeDemoPayment(plate);
+      box.querySelector(".pay-card").innerHTML = `
+        <div style="text-align:center;padding:10px 0">
+          <div style="font-size:3rem;color:var(--green)"><i class="fas fa-check-circle"></i></div>
+          <h3>Payment successful</h3>
+          <p class="pay-note">Receipt ${receipt}</p>
+          <p>Please go to the exit gate. It will open automatically.</p>
+          <button class="pay-btn" onclick="closePayModal()">Done</button>
+        </div>`;
+    } catch (e) {
+      showToast(e.message || "Payment failed", "error");
+      btn.disabled = false;
+      btn.textContent = "Pay now";
+    }
+  };
+}
+
+function closePayModal() {
+  const m = document.getElementById("pay-modal");
+  if (m) m.remove();
+}
+
+// ── TOAST ──
+function showToast(msg, type="success") {
+  const c = document.getElementById("toast");
+  const t = document.createElement("div");
+  t.className = `toast-msg ${type}`;
+  t.innerHTML = `<i class="fas fa-${type==='success'?'check-circle':'exclamation-circle'}"></i> ${msg}`;
+  c.appendChild(t);
+  setTimeout(()=>t.remove(), 3200);
+}
+
+// ── LOADER ──
+function showLoader(on) {
+  document.getElementById("loader").classList.toggle("show", on);
+}
+
+// ── FAQ TOGGLE ──
+document.querySelectorAll(".faq-q").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const item = btn.parentElement;
+    document.querySelectorAll(".faq-item").forEach(i => { if(i!==item) i.classList.remove("open"); });
+    item.classList.toggle("open");
+  });
+});
+
+// ── SCROLL TO BOOKING ──
+function scrollToBooking() {
+  document.getElementById("booking").scrollIntoView({behavior:"smooth"});
+}
+
+// Live strip counters are updated only from Firebase bookings/slots listeners.
+
+// Demo fallback disabled: Firebase/sensors listeners now always render the slot UI.
+
+// ── NAVBAR SCROLL EFFECT ──
+window.addEventListener("scroll", () => {
+  document.querySelector("nav").style.boxShadow = window.scrollY > 10 ? "0 4px 30px rgba(10,31,68,0.15)" : "0 2px 20px rgba(10,31,68,0.08)";
+});
+
+// Demo fallback disabled: do not overwrite live Firebase slot UI.
+</script>
+</body>
+</html>

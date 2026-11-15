@@ -1,0 +1,58 @@
+# Firebase private credentials
+serviceAccountKey.json
+firebase-adminsdk-*.json
+secrets/
+credentials/
+
+# Private certificates
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local Arduino secrets
+secrets.h
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+secrets.h
+
+# Firebase private credentials
+serviceAccountKey.json
+firebase-adminsdk-*.json
+secrets/
+credentials/
+.firebase/
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+
+# IDE
+.vscode/
+.idea/
+
+# Build files
+build/
+dist/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

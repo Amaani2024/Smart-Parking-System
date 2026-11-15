@@ -1,0 +1,11 @@
+HOW TO OPEN THE DASHBOARD (no Node.js needed)
+
+1. Open a terminal (Command Prompt) INSIDE this folder.
+   Tip: open the folder in File Explorer, click the address bar, type cmd, press Enter.
+2. Run:   python -m http.server 8000
+   (if "python" is not found, try:  py -m http.server 8000)
+3. Open Chrome and go to:   http://localhost:8000
+4. Keep the terminal window open while you use the dashboard. Press Ctrl+C to stop.
+
+Do NOT double-click index.html - browsers block it that way.
+Firebase rules must be published first (firebase/database.rules.json in the full package).

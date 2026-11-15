@@ -1,0 +1,135 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZENVA Voice Assistant</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="layout">
+    <header class="top glass">
+      <div>
+        <span class="label">SMART PARKING SYSTEM</span>
+        <h1>ZENVA Voice Assistant</h1>
+      </div>
+      <div class="connection">
+        <span id="connectionDot"></span>
+        <span id="connectionText">Connecting…</span>
+      </div>
+    </header>
+
+    <section class="columns">
+      <section class="assistant glass">
+        <div class="robot-stage">
+          <div class="ring ring1"></div>
+          <div class="ring ring2"></div>
+
+          <div id="robot" class="robot">
+            <div class="antenna"><span></span></div>
+            <div class="head">
+              <div class="screen">
+                <div class="eyes"><i></i><i></i></div>
+                <div class="mouth">
+                  <b></b><b></b><b></b><b></b><b></b>
+                </div>
+              </div>
+            </div>
+            <div class="body"><span></span></div>
+          </div>
+        </div>
+
+        <div class="assistant-status">
+          <span id="stateDot"></span>
+          <span id="assistantState">Ready</span>
+        </div>
+
+        <h2>Speak with ZENVA</h2>
+        <p id="assistantMessage">
+          Press the microphone button, allow microphone permission, and speak.
+        </p>
+
+        <div class="voice-box">
+          <button id="micButton" class="mic-button" type="button">
+            <span class="mic-symbol">🎙</span>
+            <span id="micText">Start speaking</span>
+          </button>
+          <div id="liveTranscript" class="transcript">Your speech will appear here.</div>
+        </div>
+
+        <div class="text-box">
+          <input id="questionInput" placeholder="Or type your question here">
+          <button id="askButton">Ask</button>
+        </div>
+
+        <div class="quick">
+          <button data-question="Which slots are available?">Available slots</button>
+          <button data-question="What is the gate status?">Gate status</button>
+          <button data-question="Give me the sensor status">Sensors</button>
+          <button data-question="Give me the system summary">System summary</button>
+        </div>
+
+        <div class="voice-help">
+          <strong>Microphone requirements</strong>
+          <p>Use Google Chrome or Microsoft Edge and open the site using
+             <code>http://127.0.0.1:5000</code>. Click Allow when microphone permission appears.</p>
+        </div>
+      </section>
+
+      <section class="dashboard">
+        <div class="metrics">
+          <article class="glass"><span>Available</span><strong id="available">—</strong></article>
+          <article class="glass"><span>Occupied</span><strong id="occupied">—</strong></article>
+          <article class="glass"><span>Reserved</span><strong id="reserved">—</strong></article>
+          <article class="glass"><span>Inside</span><strong id="inside">—</strong></article>
+        </div>
+
+        <article class="panel glass">
+          <div class="panel-head">
+            <div>
+              <span class="label">LIVE PARKING MAP</span>
+              <h3>Parking slots</h3>
+            </div>
+            <span id="updated">Waiting…</span>
+          </div>
+          <div id="slots" class="slots"></div>
+        </article>
+
+        <div class="two-panels">
+          <article class="panel glass">
+            <span class="label">ENVIRONMENT</span>
+            <div class="readings">
+              <div><span>Temperature</span><strong id="temperature">—</strong></div>
+              <div><span>Humidity</span><strong id="humidity">—</strong></div>
+              <div><span>Gas</span><strong id="gas">—</strong></div>
+              <div><span>Relay</span><strong id="relay">—</strong></div>
+            </div>
+          </article>
+
+          <article class="panel glass">
+            <span class="label">GATE</span>
+            <div id="gate" class="gate">
+              <div class="post"></div>
+              <div class="arm"></div>
+            </div>
+            <h3 id="gateStatus">Unknown</h3>
+            <p id="gateCommand">Command: —</p>
+          </article>
+        </div>
+
+        <article class="panel glass">
+          <span class="label">LATEST VEHICLE</span>
+          <div class="event">
+            <div><span>Plate</span><strong id="eventPlate">—</strong></div>
+            <div><span>Status</span><strong id="eventStatus">—</strong></div>
+            <div><span>Slot</span><strong id="eventSlot">—</strong></div>
+          </div>
+        </article>
+      </section>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
