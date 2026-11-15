@@ -1,66 +1,111 @@
+
 <p align="center">
   <img src="docs/images/banner.jpg" alt="ParkEase Smart Parking System" width="100%">
 </p>
 
+<p align="center">
+  <strong>AI-Powered Smart Parking Management System</strong>
+</p>
+
+<p align="center">
+  An integrated parking solution combining automatic number plate recognition,
+  IoT-based monitoring, online reservations, and real-time management.
+</p>
+
 ---
 
-## ✨ Features
+## Overview
 
-- 📷 **Plate recognition** at entry and exit (OpenCV + EasyOCR)
-- 🌐 **Customer website** to book a slot, check a booking and pay (demo payment)
-- 📊 **Live admin dashboard** with slot map, revenue, gate control and sensors
-- 🅿️ **IR slot sensing** on an ESP32
-- 🔥 **Fire safety**: flame sensor starts the water pump automatically
-- 🚧 **Smart gates** that close only after the car has passed
-- 🗣️ **ZENVA voice assistant** that answers from live data
+**ParkEase** is a smart parking management system designed to automate vehicle entry, parking slot allocation, and exit operations.
 
-## 🔄 How it works
+The system integrates AI-powered number plate recognition, an online booking platform, a real-time administration dashboard, and ESP32-based hardware. Firebase Realtime Database enables communication between the software and hardware components.
 
-1. Customer books a slot on the website
-2. Entry camera reads the plate → booking **active**, gate opens
-3. Exit camera reads the plate → **awaiting payment**, gate stays closed
-4. Customer pays on the website → exit gate opens
+## Key Features
 
-## 📸 Screenshots
+- **Automatic Number Plate Recognition** — Detects vehicle registration plates at entry and exit using OpenCV and EasyOCR.
+- **Online Parking Reservations** — Allows customers to reserve parking spaces, view bookings, and complete simulated payments.
+- **Real-Time Admin Dashboard** — Displays parking availability, vehicle records, revenue, sensor readings, and gate controls.
+- **Smart Parking Detection** — Uses ESP32-connected IR sensors to monitor individual parking spaces.
+- **Automated Gate Control** — Operates entry and exit barriers based on vehicle detection and booking status.
+- **Fire Safety Monitoring** — Automatically activates a water pump when the flame sensor detects fire.
+- **ZENVA Voice Assistant** — Provides voice-assisted access to live parking information.
 
-| Website: booking | Website: live slot map |
+## System Workflow
+
+1. **Reservation:** A customer books an available parking space through the website.
+2. **Vehicle Entry:** The entry camera recognizes the number plate, validates the booking, and opens the entrance gate.
+3. **Parking Monitoring:** IR sensors update parking space availability in real time.
+4. **Vehicle Exit:** The exit camera identifies the vehicle and checks its payment status.
+5. **Payment & Departure:** After payment confirmation, the exit gate opens automatically.
+
+## System Screenshots
+
+### Customer Website
+
+| Parking Reservation | Live Parking Availability |
+|:---:|:---:|
+| <img src="docs/images/website-booking.jpg" width="440" alt="Customer booking interface"> | <img src="docs/images/website-slots.jpg" width="440" alt="Live parking slot availability"> |
+
+### Administration & Voice Assistant
+
+| Admin Dashboard | ZENVA Voice Assistant |
+|:---:|:---:|
+| <img src="docs/images/dashboard.jpg" width="440" alt="ParkEase admin dashboard"> | <img src="docs/images/zenva.jpg" width="440" alt="ZENVA assistant interface"> |
+
+## Hardware Prototype
+
+The physical prototype demonstrates automated entry and exit barriers, individual parking space detection, environmental monitoring, and fire safety automation using an ESP32 microcontroller.
+
+| Front View | Top View |
+|:---:|:---:|
+| <img src="docs/images/hardware-front.jpg" width="440" alt="Hardware prototype front view"> | <img src="docs/images/hardware-top.jpg" width="440" alt="Hardware prototype top view"> |
+
+## Technology Stack
+
+| Component | Technologies |
 |---|---|
-| <img src="docs/images/website-booking.jpg" width="440"> | <img src="docs/images/website-slots.jpg" width="440"> |
+| AI & Computer Vision | Python, OpenCV, EasyOCR |
+| Customer Website | HTML, CSS, JavaScript |
+| Admin Dashboard | Web-based dashboard |
+| Voice Assistant | Flask, React |
+| Database | Firebase Realtime Database |
+| Hardware & IoT | ESP32, IR Sensors, Servo Motors, Flame Sensor |
 
-| Dashboard | ZENVA assistant |
+## Project Structure
+
+```text
+ParkEase/
+├── Smart_parking_ai/           # ANPR and gate automation
+├── User-Website/              # Customer booking website
+├── SmartParking_Dashboard/    # Administration dashboard
+├── ZENVA_Assistant/           # Voice assistant
+├── Arduino_code/              # ESP32 firmware
+├── docs/
+│   └── images/                # Project screenshots
+└── README.md
+```
+
+## Getting Started
+
+| Module | Instructions |
 |---|---|
-| <img src="docs/images/dashboard.jpg" width="440"> | <img src="docs/images/zenva.jpg" width="440"> |
+| ANPR System | Install dependencies using `python -m pip install -r requirements.txt`, then run `python parking_gate.py` |
+| Customer Website | Open `User-Website/parkease_User.html` in a web browser |
+| Admin Dashboard | Run `SmartParking_Dashboard/START_DASHBOARD.bat` and visit `http://localhost:8001` |
+| ZENVA Assistant | Run `ZENVA_Assistant/START_ZENVA.bat` and visit `http://127.0.0.1:5000` |
+| ESP32 Controller | Configure Wi-Fi credentials in the Arduino sketch and upload using Arduino IDE |
 
-## 🛠️ Hardware prototype
+**Note:** Press `M` in the ANPR application to switch between entry and exit modes.
 
-| Front view | Top view |
-|---|---|
-| <img src="docs/images/hardware-front.jpg" width="440"> | <img src="docs/images/hardware-top.jpg" width="440"> |
+## Project Scope
 
-## 🗂️ Folders
+ParkEase is an academic prototype developed to demonstrate the integration of artificial intelligence, IoT hardware, and web-based parking management.
 
-| Folder | Purpose |
-|---|---|
-| `Smart_parking_ai/` | Plate-reading gate (Python) |
-| `User-Website/` | Customer booking page |
-| `SmartParking_Dashboard/` | Admin dashboard |
-| `ZENVA_Assistant/` | Voice assistant (Flask + React) |
-| `Arduino_code/` | ESP32 firmware |
+Payment processing is simulated. Firebase security rules must be configured appropriately before deployment, and real customer information should not be stored in the current demonstration environment.
 
-## 🚀 Quick start
+---
 
-| Part | Run |
-|---|---|
-| Gate | `python -m pip install -r requirements.txt`, then `python parking_gate.py` (**M** switches entry/exit) |
-| Website | Open `User-Website/parkease_User.html` |
-| Dashboard | `SmartParking_Dashboard/START_DASHBOARD.bat` → http://localhost:8001 |
-| ZENVA | `ZENVA_Assistant/START_ZENVA.bat` → http://127.0.0.1:5000 |
-| ESP32 | Open the `.ino` in Arduino IDE, set WiFi, upload |
-
-## 🧰 Tech stack
-
-Python · OpenCV · EasyOCR · Flask · React · Firebase Realtime Database · ESP32 · HTML/CSS/JS
-
-## ⚠️ Demo notice
-
-Demo project. Payment is simulated and the Firebase rules are open, so don't store real customer data. Lock the rules down before real use.
+<p align="center">
+  <strong>ParkEase Smart Parking System</strong><br>
+  AI · IoT · Automation · Real-Time Monitoring
+</p>
